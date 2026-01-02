@@ -176,7 +176,6 @@ https://<worker-domain>/page-stats?path=/posts/hello-world/
 口径说明：
 
 - 统计基于`visits`表
-- `visits`会按90天窗口清理，因此该接口只反映保留窗口内的数据
 
 鉴权：
 
