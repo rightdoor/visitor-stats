@@ -329,7 +329,7 @@ async function handleStats(request, env) {
 
 async function cleanupOldData(env) {
   // 仅清理visits
-  const ninetyDaysMs = 24 * 60 * 60 * 1000;
-  const cutoffTime = Date.now() - ninetyDaysMs;
+  const setDaysMs = 24 * 60 * 60 * 1000;
+  const cutoffTime = Date.now() - setDaysMs;
   await env.DB.prepare('DELETE FROM visits WHERE visit_time < ?').bind(cutoffTime).run();
 }
