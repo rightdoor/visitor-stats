@@ -132,13 +132,19 @@ async function handleLog(request, env) {
     ).bind(uniqueInc, now).run();
 
     if (isPostPagePath(pagePath)) {
+      const pageUniqueInsert = await env.DB.prepare(
+        'INSERT OR IGNORE INTO page_unique_visitors (page_path, ip_hash, first_seen) VALUES (?, ?, ?)'
+      ).bind(pagePath, hashedIP, now).run();
+      const pageUniqueInc = pageUniqueInsert?.meta?.changes ? 1 : 0;
+
       await env.DB.prepare(
-        `INSERT INTO page_stats (page_path, total_visits, last_updated)
-         VALUES (?, 1, ?)
+        `INSERT INTO page_stats (page_path, total_visits, total_unique_visitors, last_updated)
+         VALUES (?, 1, ?, ?)
          ON CONFLICT(page_path) DO UPDATE SET
            total_visits = total_visits + 1,
+           total_unique_visitors = total_unique_visitors + excluded.total_unique_visitors,
            last_updated = excluded.last_updated`
-      ).bind(pagePath, now).run();
+      ).bind(pagePath, pageUniqueInc, now).run();
     }
 
     // 返回1x1透明GIF
@@ -180,7 +186,7 @@ async function handlePageStats(request, env) {
     }
 
     const pageResult = await env.DB.prepare(
-      'SELECT page_path, total_visits, last_updated FROM page_stats WHERE page_path = ?'
+      'SELECT page_path, total_visits, total_unique_visitors, last_updated FROM page_stats WHERE page_path = ?'
     ).bind(pagePath).first();
 
     const siteResult = await env.DB.prepare(
@@ -191,6 +197,7 @@ async function handlePageStats(request, env) {
       JSON.stringify({
         path: pagePath,
         articleTotal: pageResult?.total_visits || 0,
+        articleUnique: pageResult?.total_unique_visitors || 0,
         articleLastUpdated: pageResult?.last_updated || null,
         siteTotal: siteResult?.total_visits || 0,
         siteUnique: siteResult?.total_unique_visitors || 0,

@@ -85,11 +85,11 @@ https://<worker-domain>/log?path=/posts/hello-world
 https://<worker-domain>/log?path=https%3A%2F%2Fyourblog.com%2Fposts%2Fhello-world%2F
 ```
 
-### 2、查询文章累计PV（并带回全站累计）
+### 2、查询文章累计PV/UV（并带回全站累计）
 
 `GET /page-stats?path=<pathname|url>`
 
-用途：获取单篇文章累计PV（永久口径），并附带全站累计PV/UV（永久口径）。
+用途：获取单篇文章累计PV/UV（永久口径），并附带全站累计PV/UV（永久口径）。
 
 限制：
 
@@ -105,6 +105,7 @@ Query参数：
 {
   "path": "/posts/hello-world",
   "articleTotal": 10,
+  "articleUnique": 7,
   "articleLastUpdated": 1700000000000,
   "siteTotal": 1234,
   "siteUnique": 456,
@@ -116,6 +117,7 @@ Query参数：
 
 - `path`：规范化后的文章路径
 - `articleTotal`：该文章累计PV（来自`page_stats`）
+- `articleUnique`：该文章累计UV（来自`page_stats`/`page_unique_visitors`）
 - `articleLastUpdated`：文章累计最后更新时间（毫秒时间戳）
 - `siteTotal`：全站累计PV（来自`global_stats`）
 - `siteUnique`：全站累计UV（来自`global_stats/unique_visitors`）

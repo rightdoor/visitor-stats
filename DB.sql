@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS page_stats (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     page_path TEXT UNIQUE NOT NULL,              -- 页面路径
     total_visits INTEGER NOT NULL DEFAULT 0,     -- 该页面总访问次数
+    total_unique_visitors INTEGER NOT NULL DEFAULT 0, -- 该页面独立访客数
     last_updated INTEGER NOT NULL,               -- 最后更新时间
     created_at INTEGER DEFAULT (CAST(unixepoch() * 1000 AS INTEGER))
 );
@@ -46,6 +47,16 @@ CREATE TABLE IF NOT EXISTS page_stats (
 -- 索引
 CREATE INDEX IF NOT EXISTS idx_page_stats_visits ON page_stats(total_visits DESC);
 CREATE INDEX IF NOT EXISTS idx_page_stats_path ON page_stats(page_path);
+
+-- page_unique_visitors：文章页UV去重集合
+CREATE TABLE IF NOT EXISTS page_unique_visitors (
+    page_path TEXT NOT NULL,
+    ip_hash TEXT NOT NULL,
+    first_seen INTEGER NOT NULL,
+    PRIMARY KEY (page_path, ip_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_page_unique_visitors_path ON page_unique_visitors(page_path);
+CREATE INDEX IF NOT EXISTS idx_page_unique_visitors_first_seen ON page_unique_visitors(first_seen);
 
 -- config：配置
 -- allowed_domains控制哪些站点可以调用/log、/page-stats、/total

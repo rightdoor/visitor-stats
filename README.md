@@ -2,6 +2,11 @@
 
 基于Cloudflare Workers+D1 Database的访问统计服务。
 
+支持：
+
+- 全站 PV / UV（永久累计 + 实时统计）
+- 文章页 PV / UV（永久累计）
+
 ## AI部分
 
 部分冲突代码的解决和注释使用AI完成，其余部分为手动编写。
@@ -13,6 +18,21 @@
 1、创建D1 Database
 
 创建好后粘贴[DB.sql](./DB.sql)，执行run all。
+
+如果是老数据库升级到文章 UV 版本，需要额外执行迁移：
+
+```sql
+ALTER TABLE page_stats ADD COLUMN total_unique_visitors INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS page_unique_visitors (
+  page_path TEXT NOT NULL,
+  ip_hash TEXT NOT NULL,
+  first_seen INTEGER NOT NULL,
+  PRIMARY KEY (page_path, ip_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_page_unique_visitors_path ON page_unique_visitors(page_path);
+CREATE INDEX IF NOT EXISTS idx_page_unique_visitors_first_seen ON page_unique_visitors(first_seen);
+```
 
 2、创建Worker
 
