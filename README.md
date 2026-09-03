@@ -19,29 +19,16 @@
 
 创建好后粘贴[DB.sql](./DB.sql)，执行run all。
 
-如果是老数据库升级到文章 UV 版本，需要额外执行迁移：
-
-```sql
-ALTER TABLE page_stats ADD COLUMN total_unique_visitors INTEGER NOT NULL DEFAULT 0;
-
-CREATE TABLE IF NOT EXISTS page_unique_visitors (
-  page_path TEXT NOT NULL,
-  ip_hash TEXT NOT NULL,
-  first_seen INTEGER NOT NULL,
-  PRIMARY KEY (page_path, ip_hash)
-);
-CREATE INDEX IF NOT EXISTS idx_page_unique_visitors_path ON page_unique_visitors(page_path);
-CREATE INDEX IF NOT EXISTS idx_page_unique_visitors_first_seen ON page_unique_visitors(first_seen);
-```
-
 2、创建Worker
 
 创建时关联数据库，绑定变量`DB`。然后部署好后修改代码为[`index.js`](./index.js)。
 
+注意绑定变量必须是`DB`，否则后续获取数据会报错。
+
 3、配置变量
 
-`SALT`：随遍写，数字+英文
-`API_KEY`：随便写，数字+英文
+`SALT`：随机生成即可（建议32位以上数字+英文混合），但**写入数据后不能再改**——改了会导致IP哈希全部变化，UV去重失效、UV虚增
+`API_KEY`：随机生成（建议32位以上数字+英文混合），用于`/stats`接口鉴权，等同于密码，请勿放入公开的前端代码；泄露后换新即可，无数据副作用
 
 4、设置定时清理
 

@@ -252,6 +252,7 @@ async function handlePageStats(request, env) {
 }
 
 // 3、全站累计（/total，带缓存）
+// 一次返回所有统计：全站累计 + 全部文章累计列表（articles 数组）
 async function handleTotal(request, env, ctx) {
   if (request.method !== 'GET') {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), {
@@ -267,7 +268,7 @@ async function handleTotal(request, env, ctx) {
     });
   }
 
-  // 60s缓存
+  // 60s缓存；响应内容与查询参数无关，缓存键固定为 /total
   const ttlSeconds = 60;
   const cacheKey = new Request(new URL('/total', request.url).toString(), request);
   const cache = caches.default;
@@ -275,24 +276,37 @@ async function handleTotal(request, env, ctx) {
   if (cached) return cached;
 
   try {
-    const siteResult = await env.DB.prepare(
-      'SELECT total_visits, total_unique_visitors, last_updated FROM global_stats WHERE id = 1'
-    ).first();
+    // 全站累计 + 全部文章累计，两条查询合并为一次 batch 往返
+    const [siteResult, articlesResult] = await env.DB.batch([
+      env.DB.prepare(
+        'SELECT total_visits, total_unique_visitors, last_updated FROM global_stats WHERE id = 1'
+      ),
+      env.DB.prepare(
+        'SELECT page_path, total_visits, total_unique_visitors, last_updated FROM page_stats ORDER BY total_visits DESC'
+      ),
+    ]);
 
-    const response = new Response(
-      JSON.stringify({
-        siteTotal: siteResult?.total_visits || 0,
-        siteUnique: siteResult?.total_unique_visitors || 0,
-        siteLastUpdated: siteResult?.last_updated || null
-      }),
-      {
-        headers: {
-          ...corsHeaders,
-          'Content-Type': 'application/json',
-          'Cache-Control': `public, max-age=${ttlSeconds}`
-        }
+    const site = siteResult?.results?.[0];
+    const body = {
+      siteTotal: site?.total_visits || 0,
+      siteUnique: site?.total_unique_visitors || 0,
+      siteLastUpdated: site?.last_updated || null,
+      // 所有文章的累计统计，按阅读次数降序
+      articles: (articlesResult?.results || []).map(r => ({
+        path: r.page_path,
+        articleTotal: r.total_visits,
+        articleUnique: r.total_unique_visitors,
+        articleLastUpdated: r.last_updated
+      }))
+    };
+
+    const response = new Response(JSON.stringify(body), {
+      headers: {
+        ...corsHeaders,
+        'Content-Type': 'application/json',
+        'Cache-Control': `public, max-age=${ttlSeconds}`
       }
-    );
+    });
 
     ctx.waitUntil(cache.put(cacheKey, response.clone()));
     return response;

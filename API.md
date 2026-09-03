@@ -142,11 +142,13 @@ https://<worker-domain>/page-stats?path=/post/abc123
 https://<worker-domain>/page-stats?path=/posts/hello-world/
 ```
 
-### 3、查询全站累计PV/UV（带60秒缓存）
+### 3、查询全部统计（带60秒缓存）
 
 `GET /total`
 
-用途：获取全站累计PV/UV（永久口径）。
+用途：一次返回**所有统计**——全站累计PV/UV + 全部文章的累计PV/UV列表（JSON数组）。
+
+Query参数：无（响应内容固定，与查询参数无关）
 
 响应（200）：
 
@@ -154,14 +156,48 @@ https://<worker-domain>/page-stats?path=/posts/hello-world/
 {
   "siteTotal": 1234,
   "siteUnique": 456,
-  "siteLastUpdated": 1700000000000
+  "siteLastUpdated": 1779800000000,
+  "articles": [
+    {
+      "path": "/posts/ce-shi",
+      "articleTotal": 42,
+      "articleUnique": 31,
+      "articleLastUpdated": 1779800000000
+    },
+    {
+      "path": "/posts/hello-world",
+      "articleTotal": 10,
+      "articleUnique": 7,
+      "articleLastUpdated": 1779700000000
+    }
+  ]
 }
 ```
+
+字段说明：
+
+- `siteTotal`：全站累计PV（来自`global_stats`）
+- `siteUnique`：全站累计UV（来自`global_stats/unique_visitors`）
+- `siteLastUpdated`：全站累计最后更新时间（毫秒时间戳）
+- `articles`：全部文章的累计统计数组，按`articleTotal`降序排列
+  - `path`：文章路径
+  - `articleTotal`：文章累计PV
+  - `articleUnique`：文章累计UV
+  - `articleLastUpdated`：文章累计最后更新时间（毫秒时间戳）
+
+单篇文章的统计也可直接从`articles`数组中按`path`查找，无需再调`/page-stats`。
 
 缓存：
 
 - 返回头：`Cache-Control: public, max-age=60`
-- Worker边缘也会使用`caches.default`做60秒复用，降低D1压力
+- Worker边缘使用`caches.default`做60秒复用
+- 注意：数据最多滞后60秒（新访客的计数不会立刻反映）
+
+示例：
+
+```text
+GET https://<worker-domain>/total
+```
 
 常见错误：
 
