@@ -42,6 +42,23 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, Origin, X-Requested-With, Accept'
 };
 
+// 1x1 透明 GIF（埋点统一响应体）
+const gifBase64 = 'R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==';
+const gifResponse = () => new Response(
+  Uint8Array.from(atob(gifBase64), c => c.charCodeAt(0)),
+  { headers: { ...corsHeaders, 'Content-Type': 'image/gif', 'Cache-Control': 'no-store' } }
+);
+
+// 统一的 500 响应：不向客户端泄露内部错误信息
+const internalErrorResponse = () => new Response(
+  JSON.stringify({ error: 'Internal server error' }),
+  { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+);
+
+// 白名单内存缓存（isolate 存活期内复用，减少每次请求的 D1 查询）
+let allowedDomainsCache = { value: null, ts: 0 };
+const ALLOWED_DOMAINS_TTL = 60_000; // 60秒
+
 function handleCors() {
   return new Response(null, { headers: corsHeaders });
 }
@@ -51,19 +68,26 @@ async function validateOrigin(request, env) {
   // 优先Origin，其次Referer
   const origin = request.headers.get('Origin') || new URL(request.headers.get('Referer') || 'http://error.error').origin;
   try {
-    const result = await env.DB.prepare("SELECT value FROM config WHERE key = 'allowed_domains'").first();
-    const allowedDomains = JSON.parse(result?.value || '[]');
+    // 命中缓存直接返回；未命中查 D1 并回填（修改白名单后最多延迟60秒生效）
+    let allowedDomains = allowedDomainsCache.value;
+    if (!allowedDomains || Date.now() - allowedDomainsCache.ts > ALLOWED_DOMAINS_TTL) {
+      const result = await env.DB.prepare("SELECT value FROM config WHERE key = 'allowed_domains'").first();
+      allowedDomains = JSON.parse(result?.value || '[]');
+      allowedDomainsCache = { value: allowedDomains, ts: Date.now() };
+    }
     return allowedDomains.includes(origin) || allowedDomains.includes('*');
   } catch (e) {
-    console.error(e);
+    console.error('validateOrigin error:', e);
     return false;
   }
 }
 
-// 校验API Key
+// 校验API Key（恒定时间比较，避免时序侧信道）
 function validateApiKey(request, env) {
-  const authHeader = request.headers.get('Authorization');
-  return authHeader && authHeader === `Bearer ${env.API_KEY}`;
+  const authHeader = request.headers.get('Authorization') || '';
+  const expected = new TextEncoder().encode(`Bearer ${env.API_KEY}`);
+  const actual = new TextEncoder().encode(authHeader);
+  return expected.length === actual.length && crypto.subtle.timingSafeEqual(expected, actual);
 }
 
 // 哈希IP
@@ -107,6 +131,10 @@ async function handleLog(request, env) {
 
   try {
     const ip = request.headers.get('CF-Connecting-IP') || '';
+    // 无IP时哈希结果恒定，会污染UV去重口径，直接跳过计数但仍返回GIF
+    if (!ip) {
+      return gifResponse();
+    }
     const userAgent = request.headers.get('User-Agent') || '';
     const referer = request.headers.get('Referer') || '';
     const country = request.headers.get('CF-IPCountry') || '';
@@ -117,26 +145,37 @@ async function handleLog(request, env) {
     const hashedIP = await hashIP(ip, env.SALT);
 
     const now = Date.now();
+    const isPost = isPostPagePath(pagePath);
 
-    await env.DB.prepare(
-      'INSERT INTO visits (visit_time, page_path, ip_hash, user_agent, referer, country) VALUES (?, ?, ?, ?, ?, ?)'
-    ).bind(now, pagePath, hashedIP, userAgent.substring(0, 1000), referer.substring(0, 500), country).run();
-
-    const uniqueInsert = await env.DB.prepare(
-      'INSERT OR IGNORE INTO unique_visitors (ip_hash, first_seen) VALUES (?, ?)'
-    ).bind(hashedIP, now).run();
-
+    // 第一批（batch为同一事务、一次往返）：写明细 + 全站UV去重
+    const [, uniqueInsert] = await env.DB.batch([
+      env.DB.prepare(
+        'INSERT INTO visits (visit_time, page_path, ip_hash, user_agent, referer, country) VALUES (?, ?, ?, ?, ?, ?)'
+      ).bind(now, pagePath, hashedIP, userAgent.substring(0, 1000), referer.substring(0, 500), country),
+      env.DB.prepare(
+        'INSERT OR IGNORE INTO unique_visitors (ip_hash, first_seen) VALUES (?, ?)'
+      ).bind(hashedIP, now),
+    ]);
     const uniqueInc = uniqueInsert?.meta?.changes ? 1 : 0;
-    await env.DB.prepare(
-      'UPDATE global_stats SET total_visits = total_visits + 1, total_unique_visitors = total_unique_visitors + ?, last_updated = ? WHERE id = 1'
-    ).bind(uniqueInc, now).run();
 
-    if (isPostPagePath(pagePath)) {
-      const pageUniqueInsert = await env.DB.prepare(
-        'INSERT OR IGNORE INTO page_unique_visitors (page_path, ip_hash, first_seen) VALUES (?, ?, ?)'
-      ).bind(pagePath, hashedIP, now).run();
-      const pageUniqueInc = pageUniqueInsert?.meta?.changes ? 1 : 0;
+    // 第二批：全站累计（+ 文章UV去重）
+    const batch2 = [
+      env.DB.prepare(
+        'UPDATE global_stats SET total_visits = total_visits + 1, total_unique_visitors = total_unique_visitors + ?, last_updated = ? WHERE id = 1'
+      ).bind(uniqueInc, now),
+    ];
+    if (isPost) {
+      batch2.push(
+        env.DB.prepare(
+          'INSERT OR IGNORE INTO page_unique_visitors (page_path, ip_hash, first_seen) VALUES (?, ?, ?)'
+        ).bind(pagePath, hashedIP, now)
+      );
+    }
+    const batch2Results = await env.DB.batch(batch2);
 
+    // 第三批（仅文章页）：文章累计 UPSERT，UV增量取第二批去重插入的结果
+    if (isPost) {
+      const pageUniqueInc = batch2Results[1]?.meta?.changes ? 1 : 0;
       await env.DB.prepare(
         `INSERT INTO page_stats (page_path, total_visits, total_unique_visitors, last_updated)
          VALUES (?, 1, ?, ?)
@@ -148,12 +187,11 @@ async function handleLog(request, env) {
     }
 
     // 返回1x1透明GIF
-    const gifBase64 = 'R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==';
-    return new Response(Uint8Array.from(atob(gifBase64), c => c.charCodeAt(0)), {
-      headers: { ...corsHeaders, 'Content-Type': 'image/gif', 'Cache-Control': 'no-store' }
-    });
+    return gifResponse();
   } catch (err) {
-    return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: corsHeaders });
+    // 埋点失败静默降级：不影响宿主页面展示，仅记录日志排查
+    console.error('handleLog error:', err);
+    return gifResponse();
   }
 }
 
@@ -185,31 +223,31 @@ async function handlePageStats(request, env) {
       });
     }
 
-    const pageResult = await env.DB.prepare(
-      'SELECT page_path, total_visits, total_unique_visitors, last_updated FROM page_stats WHERE page_path = ?'
-    ).bind(pagePath).first();
-
-    const siteResult = await env.DB.prepare(
-      'SELECT total_visits, total_unique_visitors, last_updated FROM global_stats WHERE id = 1'
-    ).first();
+    // 两条查询合并为一次 batch 往返，响应结构不变
+    const [pageResult, siteResult] = await env.DB.batch([
+      env.DB.prepare(
+        'SELECT page_path, total_visits, total_unique_visitors, last_updated FROM page_stats WHERE page_path = ?'
+      ).bind(pagePath),
+      env.DB.prepare(
+        'SELECT total_visits, total_unique_visitors, last_updated FROM global_stats WHERE id = 1'
+      ),
+    ]);
 
     return new Response(
       JSON.stringify({
         path: pagePath,
-        articleTotal: pageResult?.total_visits || 0,
-        articleUnique: pageResult?.total_unique_visitors || 0,
-        articleLastUpdated: pageResult?.last_updated || null,
-        siteTotal: siteResult?.total_visits || 0,
-        siteUnique: siteResult?.total_unique_visitors || 0,
-        siteLastUpdated: siteResult?.last_updated || null
+        articleTotal: pageResult?.results?.[0]?.total_visits || 0,
+        articleUnique: pageResult?.results?.[0]?.total_unique_visitors || 0,
+        articleLastUpdated: pageResult?.results?.[0]?.last_updated || null,
+        siteTotal: siteResult?.results?.[0]?.total_visits || 0,
+        siteUnique: siteResult?.results?.[0]?.total_unique_visitors || 0,
+        siteLastUpdated: siteResult?.results?.[0]?.last_updated || null
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   } catch (err) {
-    return new Response(JSON.stringify({ error: err.message }), {
-      status: 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
+    console.error('handlePageStats error:', err);
+    return internalErrorResponse();
   }
 }
 
@@ -259,10 +297,8 @@ async function handleTotal(request, env, ctx) {
     ctx.waitUntil(cache.put(cacheKey, response.clone()));
     return response;
   } catch (err) {
-    return new Response(JSON.stringify({ error: err.message }), {
-      status: 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
+    console.error('handleTotal error:', err);
+    return internalErrorResponse();
   }
 }
 
@@ -330,13 +366,20 @@ async function handleStats(request, env) {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   } catch (err) {
-    return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: corsHeaders });
+    console.error('handleStats error:', err);
+    return internalErrorResponse();
   }
 }
 
 async function cleanupOldData(env) {
-  // 仅清理visits
-  const setDaysMs = 24 * 60 * 60 * 1000;
-  const cutoffTime = Date.now() - setDaysMs;
-  await env.DB.prepare('DELETE FROM visits WHERE visit_time < ?').bind(cutoffTime).run();
+  // 仅清理visits：只保留最近1天（当天访客口径，与文档一致）
+  // 分批删除，避免单次大事务超时/锁表
+  const cutoffTime = Date.now() - 24 * 60 * 60 * 1000;
+  let deleted = 0;
+  do {
+    const r = await env.DB.prepare(
+      'DELETE FROM visits WHERE id IN (SELECT id FROM visits WHERE visit_time < ? LIMIT 5000)'
+    ).bind(cutoffTime).run();
+    deleted = r?.meta?.changes || 0;
+  } while (deleted > 0);
 }
